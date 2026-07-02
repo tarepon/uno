@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UNO — CPU対戦</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:radial-gradient(ellipse at center,#2d7a3a 0%,#1a4d24 100%);
+  font-family:'Arial',sans-serif;color:#fff;
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;
+  padding:12px 8px;user-select:none;
+}
+h1{
+  font-size:2.4rem;font-weight:900;letter-spacing:4px;
+  text-shadow:0 0 20px rgba(255,220,0,0.8),3px 3px 0 #000;
+  color:#ffe600;margin-bottom:10px;
+}
+.game{width:100%;max-width:860px;display:flex;flex-direction:column;gap:8px}
+
+/* ── HANDS ── */
+.area-label{font-size:.8rem;opacity:.8;text-align:center;padding:2px 0}
+.hand{
+  display:flex;flex-wrap:wrap;gap:4px;justify-content:center;
+  background:rgba(0,0,0,.2);border-radius:12px;padding:10px;min-height:110px;
+  align-items:center;
+}
+
+/* ── CARD ── */
+.card{
+  width:58px;height:88px;border-radius:9px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  font-weight:900;position:relative;
+  box-shadow:2px 3px 8px rgba(0,0,0,.5);
+  border:2px solid rgba(255,255,255,.25);
+  transition:transform .13s,box-shadow .13s;
+  flex-shrink:0;
+}
+.card .cm{font-size:1.5rem;line-height:1}
+.card .cl,.card .cr{
+  position:absolute;font-size:.62rem;line-height:1;font-weight:900;
+}
+.card .cl{top:3px;left:4px}
+.card .cr{bottom:3px;right:4px;transform:rotate(180deg)}
+
+/* colours */
+.red   {background:#d32f2f;color:#fff}
+.blue  {background:#1565c0;color:#fff}
+.green {background:#2e7d32;color:#fff;border-color:rgba(255,255,255,.4)}
+.yellow{background:#f9a825;color:#333}
+.wild  {
+  background:conic-gradient(#d32f2f 0 25%,#f9a825 25% 50%,#2e7d32 50% 75%,#1565c0 75% 100%);
+  color:#fff;text-shadow:1px 1px 3px #000;border-color:rgba(255,255,255,.5);
+}
+.back  {
+  background:repeating-linear-gradient(45deg,#222 0 6px,#444 6px 12px);
+  border:3px solid #999;cursor:default;
+}
+.back .cm{font-size:.85rem;letter-spacing:1px;color:#ffe600;text-shadow:1px 1px 3px #000}
+
+/* playable hover */
+.playable{cursor:pointer;border-color:rgba(255,255,255,.85)}
+.playable:hover{transform:translateY(-12px);box-shadow:4px 10px 18px rgba(0,0,0,.6)}
+.dim{opacity:.45;cursor:not-allowed}
+
+/* ── TABLE CENTER ── */
+.table-mid{
+  display:flex;justify-content:center;align-items:center;gap:32px;
+  padding:12px;
+}
+.pile{text-align:center}
+.pile-lbl{font-size:.75rem;opacity:.8;margin-bottom:4px;display:flex;align-items:center;justify-content:center;gap:6px}
+.badge{
+  display:inline-block;width:18px;height:18px;border-radius:50%;
+  border:2px solid #fff;vertical-align:middle;
+}
+.badge-red   {background:#d32f2f}
+.badge-blue  {background:#1565c0}
+.badge-green {background:#2e7d32}
+.badge-yellow{background:#f9a825}
+
+/* draw pile clickable */
+#draw-btn.card{cursor:pointer}
+#draw-btn.card:hover{transform:translateY(-4px)}
+
+/* ── STATUS / LOG ── */
+.info{display:flex;flex-direction:column;gap:6px;align-items:center}
+#status{
+  background:rgba(0,0,0,.3);border-radius:8px;
+  padding:6px 16px;font-size:.9rem;font-weight:bold;
+}
+#log{
+  background:rgba(0,0,0,.2);border-radius:8px;
+  padding:6px 14px;font-size:.82rem;min-height:36px;
+  text-align:center;max-width:500px;
+}
+
+/* ── UNO BUTTON ── */
+#uno-btn{
+  padding:8px 24px;font-size:1rem;font-weight:900;letter-spacing:2px;
+  background:#e53935;color:#fff;border:none;border-radius:20px;
+  cursor:pointer;box-shadow:0 4px 10px rgba(0,0,0,.4);
+  transition:transform .1s,background .1s;
+}
+#uno-btn:hover:not(:disabled){background:#ef5350;transform:scale(1.07)}
+#uno-btn:disabled{opacity:.45;cursor:not-allowed}
+
+/* ── MODAL BASE ── */
+.overlay{
+  display:none;position:fixed;inset:0;
+  background:rgba(0,0,0,.75);z-index:90;
+}
+.modal{
+  display:none;position:fixed;top:50%;left:50%;
+  transform:translate(-50%,-50%);z-index:100;
+  background:#1b1b2f;border-radius:18px;padding:28px 32px;
+  text-align:center;min-width:280px;
+  box-shadow:0 8px 40px rgba(0,0,0,.7);
+}
+
+/* ── COLOR PICKER ── */
+#picker h3{margin-bottom:18px;font-size:1.1rem}
+.color-btns{display:flex;gap:12px;justify-content:center}
+.cbtn{
+  width:60px;height:60px;border-radius:50%;border:3px solid #fff;
+  cursor:pointer;font-size:.72rem;font-weight:900;
+  transition:transform .12s;display:flex;align-items:center;justify-content:center;
+}
+.cbtn:hover{transform:scale(1.18)}
+.cbtn.red   {background:#d32f2f;color:#fff}
+.cbtn.blue  {background:#1565c0;color:#fff}
+.cbtn.green {background:#2e7d32;color:#fff}
+.cbtn.yellow{background:#f9a825;color:#333}
+
+/* ── RESULT ── */
+#result{display:none}
+.rtitle{font-size:2.4rem;font-weight:900;margin-bottom:10px}
+.rsub  {font-size:1rem;opacity:.85;margin-bottom:22px}
+#result button{
+  padding:12px 32px;font-size:1.05rem;font-weight:bold;
+  background:#4caf50;color:#fff;border:none;border-radius:12px;
+  cursor:pointer;box-shadow:0 4px 10px rgba(0,0,0,.35);
+}
+#result button:hover{background:#66bb6a}
+
+/* ── CPU TURN INDICATOR ── */
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.thinking{animation:pulse .8s infinite;font-size:.85rem;opacity:.8}
+</style>
+</head>
+<body>
+<div class="game">
+  <h1>UNO</h1>
+
+  <!-- CPU -->
+  <div class="area-label">CPU の手札 <span id="cpu-cnt">0</span>枚</div>
+  <div class="hand" id="cpu-hand"></div>
+
+  <!-- Table center -->
+  <div class="table-mid">
+    <div class="pile">
+      <div class="pile-lbl">山札</div>
+      <div class="card back" id="draw-btn" onclick="drawCard()">
+        <span class="cm">UNO</span>
+      </div>
+    </div>
+    <div class="pile">
+      <div class="pile-lbl">
+        捨て札
+        <span class="badge" id="col-badge"></span>
+      </div>
+      <div id="disc-top"></div>
+    </div>
+  </div>
+
+  <!-- Status / log / UNO btn -->
+  <div class="info">
+    <div id="status">準備中…</div>
+    <div id="log">カードを選んでプレイしましょう。</div>
+    <button id="uno-btn" onclick="callUno()" disabled>UNO！</button>
+  </div>
+
+  <!-- Player -->
+  <div class="area-label">あなたの手札</div>
+  <div class="hand" id="player-hand"></div>
+</div>
+
+<!-- Color picker modal -->
+<div class="overlay" id="overlay"></div>
+<div class="modal" id="picker">
+  <h3>色を選んでください</h3>
+  <div class="color-btns">
+    <div class="cbtn red"    onclick="chooseColor('red')">赤</div>
+    <div class="cbtn blue"   onclick="chooseColor('blue')">青</div>
+    <div class="cbtn green"  onclick="chooseColor('green')">緑</div>
+    <div class="cbtn yellow" onclick="chooseColor('yellow')">黄</div>
+  </div>
+</div>
+
+<!-- Result modal -->
+<div class="overlay" id="overlay2"></div>
+<div class="modal" id="result">
+  <div class="rtitle" id="rtitle"></div>
+  <div class="rsub"   id="rsub"></div>
+  <button onclick="init()">もう一度遊ぶ</button>
+</div>
+
+<script>
+const COLORS = ['red','blue','green','yellow'];
+const CJP = {red:'赤',blue:'青',green:'緑',yellow:'黄'};
+const SYM = {skip:'⊘',rev:'⇄',d2:'+2',wild:'★',w4:'+4'};
+
+function sym(card){ return SYM[card.t] || card.t }
+function cname(c){ return CJP[c] || 'ワイルド' }
+
+function makeDeck(){
+  const d=[];
+  COLORS.forEach(c=>{
+    d.push({c,t:'0'});
+    for(let n=1;n<=9;n++){ d.push({c,t:''+n}); d.push({c,t:''+n}); }
+    ['skip','rev','d2'].forEach(a=>{ d.push({c,t:a}); d.push({c,t:a}); });
+  });
+  for(let i=0;i<4;i++){ d.push({c:'w',t:'wild'}); d.push({c:'w',t:'w4'}); }
+  return d;
+}
+function shuffle(a){
+  for(let i=a.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [a[i],a[j]]=[a[j],a[i]];
+  }
+  return a;
+}
+
+// ── STATE ──
+let G={};
+
+function init(){
+  G={
+    deck:shuffle(makeDeck()),
+    disc:[],
+    ph:[],ch:[],
+    turn:'p',      // 'p' | 'c'
+    col:'red',
+    pending:0,     // stacked draw count
+    pUno:false,
+    over:false,
+    pendWild:null,
+  };
+  hide('picker'); hide('result');
+  hide('overlay'); hide('overlay2');
+  for(let i=0;i<7;i++){ G.ph.push(G.deck.pop()); G.ch.push(G.deck.pop()); }
+
+  // Starting card — not wild4
+  let card;
+  do{
+    card=G.deck.pop();
+    if(card.t==='w4'){ G.deck.unshift(card); card=null; }
+  }while(!card);
+  G.disc.push(card);
+  G.col = card.c==='w' ? COLORS[Math.floor(Math.random()*4)] : card.c;
+
+  render();
+  applyStart(card);
+}
+
+function applyStart(card){
+  if(card.t==='skip'||card.t==='rev'){
+    log(`最初のカードが ${sym(card)}！あなたはスキップ。CPUから開始。`);
+    G.turn='c'; render(); setTimeout(cpuTurn,1400);
+  } else if(card.t==='d2'){
+    G.pending=2;
+    log('最初のカードが +2！あなたは2枚引くか、+2でスタックできます。');
+    render();
+  } else if(card.t==='wild'){
+    log(`最初のカードがワイルド！色は ${cname(G.col)} です。`);
+    render();
+  } else {
+    log('ゲームスタート！カードを選んでプレイしよう。');
+    render();
+  }
+}
+
+// ── RENDER ──
+function render(){
+  // CPU hand (face-down)
+  document.getElementById('cpu-hand').innerHTML =
+    G.ch.map(()=>`<div class="card back"><span class="cm">UNO</span></div>`).join('');
+  document.getElementById('cpu-cnt').textContent = G.ch.length;
+
+  // Player hand
+  const ph = document.getElementById('player-hand');
+  ph.innerHTML='';
+  G.ph.forEach((card,i)=>{
+    const p = G.turn==='p' && !G.over && isPlayable(card);
+    const div=document.createElement('div');
+    const cc = card.c==='w'?'wild':card.c;
+    div.className=`card ${cc} ${p?'playable':'dim'}`;
+    const s=sym(card);
+    div.innerHTML=`<span class="cl">${s}</span><span class="cm">${s}</span><span class="cr">${s}</span>`;
+    if(p) div.onclick=()=>playCard(i);
+    ph.appendChild(div);
+  });
+
+  // Discard top
+  const top=G.disc[G.disc.length-1];
+  const de=document.getElementById('disc-top');
+  if(top){
+    const cc=top.c==='w'?'wild':top.c;
+    const s=sym(top);
+    de.innerHTML=`<div class="card ${cc}" style="cursor:default">
+      <span class="cl">${s}</span><span class="cm">${s}</span><span class="cr">${s}</span>
+    </div>`;
+  }
+
+  // Color badge
+  document.getElementById('col-badge').className=`badge badge-${G.col}`;
+
+  // Status
+  document.getElementById('status').textContent =
+    G.turn==='p'
+      ? `あなたのターン（手札: ${G.ph.length}枚）`
+      : `CPUのターン（手札: ${G.ch.length}枚）`;
+
+  // UNO button
+  document.getElementById('uno-btn').disabled =
+    !(G.turn==='p' && G.ph.length===1 && !G.pUno && !G.over);
+
+  // Draw pile dimmed if empty
+  document.getElementById('draw-btn').style.opacity=G.deck.length>0?'1':'0.4';
+}
+
+function log(msg){ document.getElementById('log').textContent=msg }
+function show(id){ document.getElementById(id).style.display='block' }
+function hide(id){ document.getElementById(id).style.display='none' }
+function showFlex(id){ document.getElementById(id).style.display='flex' }
+
+// ── PLAY VALIDITY ──
+function isPlayable(card){
+  if(G.pending>0){
+    const top=G.disc[G.disc.length-1];
+    return (top.t==='d2'&&card.t==='d2')||(top.t==='w4'&&card.t==='w4');
+  }
+  if(card.c==='w') return true;
+  const top=G.disc[G.disc.length-1];
+  return card.c===G.col || card.t===top.t;
+}
+
+// ── PLAYER ACTIONS ──
+function drawCard(){
+  if(G.turn!=='p'||G.over) return;
+
+  if(G.pending>0){
+    drawN(G.pending,G.ph);
+    log(`${G.pending}枚引きました。CPUのターンへ。`);
+    G.pending=0; G.turn='c'; render();
+    setTimeout(cpuTurn,1400);
+    return;
+  }
+
+  if(G.ph.some(c=>isPlayable(c))){ log('プレイできるカードがあります！'); return; }
+
+  if(G.deck.length===0) reshuffle();
+  if(G.deck.length===0){
+    log('山札なし。スキップします。');
+    G.turn='c'; render(); setTimeout(cpuTurn,1400);
+    return;
+  }
+
+  const drawn=G.deck.pop();
+  G.ph.push(drawn);
+  log(`引いた: ${cname(drawn.c)} ${sym(drawn)}${isPlayable(drawn)?' ← プレイ可能！':''}`);
+  if(!isPlayable(drawn)){
+    G.turn='c'; render(); setTimeout(cpuTurn,1400);
+  } else {
+    render();
+  }
+}
+
+function playCard(i){
+  if(G.turn!=='p'||G.over) return;
+  const card=G.ph[i];
+  if(!isPlayable(card)) return;
+
+  G.ph.splice(i,1);
+  G.disc.push(card);
+
+  if(G.ph.length===0){ endGame(true); return; }
+  if(G.ph.length===1&&!G.pUno) log('残り1枚！UNOボタンを押して！');
+
+  if(card.c==='w'){
+    G.pendWild=card;
+    show('overlay'); show('picker');
+    render(); return;
+  }
+
+  G.col=card.c;
+  applyEffect(card,'p');
+}
+
+function callUno(){
+  if(G.ph.length===1&&!G.pUno){ G.pUno=true; log('UNO！'); render(); }
+}
+
+function chooseColor(col){
+  hide('overlay'); hide('picker');
+  G.col=col;
+  const card=G.pendWild; G.pendWild=null;
+  log(`色を ${cname(col)} に変更しました。`);
+  applyEffect(card,'p');
+}
+
+// ── EFFECTS ──
+function applyEffect(card,by){
+  const next=by==='p'?'c':'p';
+
+  switch(card.t){
+    case 'skip':
+      log(by==='p'
+        ? `スキップ！CPUをスキップ。続けてどうぞ。`
+        : `スキップされました！CPUの続きターン。`);
+      render();
+      if(by==='c') setTimeout(cpuTurn,1400);
+      return;
+
+    case 'rev':
+      log(by==='p'
+        ? `リバース（1v1 = スキップ）！続けてどうぞ。`
+        : `リバース！CPUが続きます。`);
+      render();
+      if(by==='c') setTimeout(cpuTurn,1400);
+      return;
+
+    case 'd2':
+      G.pending+=2;
+      log(by==='p'
+        ? `+2！CPUは ${G.pending} 枚引く必要があります。`
+        : `CPUが +2！あなたは ${G.pending} 枚引くか、+2でスタックできます。`);
+      G.turn=next; render();
+      if(by==='p') setTimeout(cpuTurn,1400);
+      return;
+
+    case 'w4':
+      G.pending+=4;
+      log(by==='p'
+        ? `ワイルド+4！${cname(G.col)} に変更。CPUは ${G.pending} 枚引きます。`
+        : `CPUがワイルド+4！${cname(G.col)} に変更。あなたは ${G.pending} 枚引く必要があります。`);
+      G.turn=next; render();
+      if(by==='p') setTimeout(cpuTurn,1400);
+      return;
+
+    case 'wild':
+      log(by==='p'
+        ? `ワイルド！${cname(G.col)} に変更。CPUのターン。`
+        : `CPUがワイルド！${cname(G.col)} に変更。`);
+      G.turn=next; render();
+      if(by==='p') setTimeout(cpuTurn,1400);
+      return;
+
+    default: // number
+      if(by==='p') G.pUno=false;
+      G.turn=next; render();
+      if(by==='p') setTimeout(cpuTurn,1400);
+  }
+}
+
+// ── CPU AI ──
+function cpuTurn(){
+  if(G.over||G.turn!=='c') return;
+
+  // Stacked draw pending?
+  if(G.pending>0){
+    const top=G.disc[G.disc.length-1];
+    const si=G.ch.findIndex(c=>(top.t==='d2'&&c.t==='d2')||(top.t==='w4'&&c.t==='w4'));
+    if(si>=0){
+      const sc=G.ch.splice(si,1)[0];
+      G.disc.push(sc);
+      if(sc.t==='d2'){ G.col=sc.c; G.pending+=2; }
+      else { G.col=cpuColor(); G.pending+=4; }
+      log(`CPUがスタック！あなたは ${G.pending} 枚引く必要があります。`);
+      if(G.ch.length===0){ endGame(false); return; }
+      G.turn='p'; render(); return;
+    }
+    drawN(G.pending,G.ch);
+    log(`CPUが ${G.pending} 枚引きました。あなたのターン。`);
+    G.pending=0; G.turn='p'; render(); return;
+  }
+
+  // Find playable cards
+  const plays=G.ch.map((c,i)=>({c,i})).filter(({c})=>isPlayable(c));
+
+  if(plays.length===0){
+    if(G.deck.length===0) reshuffle();
+    if(G.deck.length===0){
+      log('CPUも引けません。スキップ。');
+      G.turn='p'; render(); return;
+    }
+    const drawn=G.deck.pop();
+    G.ch.push(drawn);
+    log('CPUがカードを1枚引きました。');
+    if(isPlayable(drawn)){
+      render();
+      setTimeout(()=>cpuPlay(G.ch.length-1),900);
+    } else {
+      G.turn='p'; render();
+    }
+    return;
+  }
+
+  // Choose best card (slight delay for realism)
+  const chosen=cpuChoose(plays);
+  setTimeout(()=>cpuPlay(chosen),700);
+}
+
+function cpuChoose(plays){
+  const score=c=>{
+    if(c.t==='w4')   return 50;
+    if(c.t==='d2')   return 40;
+    if(c.t==='skip'||c.t==='rev') return 30;
+    if(c.t==='wild') return 5;
+    return 20+(c.c===G.col?5:0)+(parseInt(c.t)||0)/10;
+  };
+  plays.sort((a,b)=>score(b.c)-score(a.c));
+  return plays[0].i;
+}
+
+function cpuPlay(i){
+  const card=G.ch[i];
+  G.ch.splice(i,1);
+  G.disc.push(card);
+
+  if(G.ch.length===0){
+    G.col = card.c==='w' ? cpuColor() : card.c;
+    endGame(false); return;
+  }
+
+  const uno = G.ch.length===1;
+  const prefix = uno ? 'CPU「UNO！」' : 'CPU';
+  log(`${prefix}: ${cname(card.c)} ${sym(card)} をプレイ。`);
+
+  if(card.c==='w') G.col=cpuColor();
+  else G.col=card.c;
+
+  applyEffect(card,'c');
+}
+
+function cpuColor(){
+  const cnt={red:0,blue:0,green:0,yellow:0};
+  G.ch.forEach(c=>{ if(c.c!=='w') cnt[c.c]++; });
+  const sorted=Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
+  return sorted[0][1]>0 ? sorted[0][0] : COLORS[Math.floor(Math.random()*4)];
+}
+
+// ── UTILITIES ──
+function drawN(n,hand){
+  for(let i=0;i<n;i++){
+    if(G.deck.length===0) reshuffle();
+    if(G.deck.length>0) hand.push(G.deck.pop());
+  }
+}
+
+function reshuffle(){
+  if(G.disc.length<=1) return;
+  const top=G.disc.pop();
+  G.deck=shuffle([...G.disc]);
+  G.disc=[top];
+  log('山札を補充しました。');
+}
+
+// ── GAME END ──
+function endGame(playerWon){
+  G.over=true; render();
+  document.getElementById('rtitle').textContent = playerWon ? '🎉 あなたの勝ち！' : '😢 CPUの勝ち…';
+  document.getElementById('rtitle').style.color   = playerWon ? '#ffd700' : '#ff6b6b';
+  document.getElementById('rsub').textContent     = playerWon ? 'おめでとうございます！' : '次は勝てるはず！もう一度！';
+  show('overlay2'); show('result');
+}
+
+// ── START ──
+init();
+</script>
+</body>
+</html>
