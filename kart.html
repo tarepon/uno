@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>スーパーカートグランプリ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #111; touch-action: none;
+    font-family: 'Segoe UI', 'Hiragino Sans', 'Meiryo', sans-serif;
+  }
+  #game {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    image-rendering: pixelated;
+    background: #000;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+// ============================================================
+//  スーパーカートグランプリ  – Mode7風 疑似3Dカートレース
+//  依存ライブラリなし / 1ファイル完結
+// ============================================================
+
+// ---------- 基本定数 ----------
+const IW = 480, IH = 270;          // 内部解像度
+const HORIZON = 96;                // 地平線Y
+const FOCAL = 300;                 // 焦点距離
+const CAM_H = 34;                  // カメラ高さ
+const CAM_BACK = 95;               // カートからカメラまでの距離
+const TRACK_SIZE = 2048;           // トラックテクスチャ(=ワールド)サイズ
+const ROAD_W = 100;                // 道路幅
+const LAPS = 3;
+const KART_COUNT = 6;
+const VIEW_MAX = 1000;             // 描画距離
+const FOG_START = 520;
+
+const TAU = Math.PI * 2;
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function angDiff(a, b) { let d = (b - a) % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return d; }
+
+// ---------- キャラクター ----------
+const CHARS = [
+  { name: 'レオ',   body: '#e03030', helm: '#c02020', speed: 3.75, handling: 0.032 },
+  { name: 'ミント', body: '#30b050', helm: '#209040', speed: 3.60, handling: 0.040 },
+  { name: 'ソラ',   body: '#3868e0', helm: '#2850c0', speed: 3.65, handling: 0.038 },
+  { name: 'モモ',   body: '#f070a8', helm: '#d05890', speed: 3.55, handling: 0.043 },
+  { name: 'ゴル',   body: '#e8b820', helm: '#c89810', speed: 3.70, handling: 0.035 },
+  { name: 'クロ',   body: '#484858', helm: '#303040', speed: 3.80, handling: 0.029 },
+];
+
+// ---------- キャンバス ----------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const inner = document.createElement('canvas');
+inner.width = IW; inner.height = IH;
+const ictx = inner.getContext('2d');
+ictx.imageSmoothingEnabled = false;
+const frame = ictx.createImageData(IW, IH);
+const fb = new Uint32Array(frame.data.buffer);
+
+let dispW = IW * 2, dispH = IH * 2;
+function resize() {
+  const s = Math.min(window.innerWidth / IW, window.innerHeight / IH);
+  dispW = Math.floor(IW * s); dispH = Math.floor(IH * s);
+  canvas.width = dispW; canvas.height = dispH;
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- 色ユーティリティ (ABGR little-endian) ----------
+function rgb(r, g, b) { return (255 << 24) | (b << 16) | (g << 8) | r; }
+function mixCol(c1, c2, t) {
+  const r = ((c1 & 255) * (1 - t) + (c2 & 255) * t) | 0;
+  const g = (((c1 >> 8) & 255) * (1 - t) + ((c2 >> 8) & 255) * t) | 0;
+  const b = (((c1 >> 16) & 255) * (1 - t) + ((c2 >> 16) & 255) * t) | 0;
+  return rgb(r, g, b);
+}
+
+// ============================================================
+//  コース生成
+// ============================================================
+// コントロールポイント (2048x2048ワールド内)
+const CTRL = [
+  [430, 1750], [270, 1450], [250, 1100], [370, 800], [300, 500],
+  [500, 280], [850, 230], [1150, 340], [1300, 620], [1500, 780],
+  [1780, 700], [1900, 950], [1800, 1250], [1550, 1300], [1400, 1150],
+  [1200, 1200], [1150, 1450], [1350, 1650], [1300, 1850], [1000, 1900],
+  [750, 1800], [700, 1600], [800, 1450], [700, 1300], [520, 1400],
+  [560, 1650],
+];
+// Catmull-Rom スプラインでパス生成
+const PATH = [];
+(function buildPath() {
+  const n = CTRL.length, seg = 26;
+  for (let i = 0; i < n; i++) {
+    const p0 = CTRL[(i - 1 + n) % n], p1 = CTRL[i], p2 = CTRL[(i + 1) % n], p3 = CTRL[(i + 2) % n];
+    for (let j = 0; j < seg; j++) {
+      const t = j / seg, t2 = t * t, t3 = t2 * t;
+      const x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3);
+      const y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3);
+      PATH.push({ x, y });
+    }
+  }
+  // 方向を計算
+  const N = PATH.length;
+  for (let i = 0; i < N; i++) {
+    const a = PATH[i], b = PATH[(i + 1) % N];
+    a.dir = Math.atan2(b.y - a.y, b.x - a.x);
+  }
+})();
+const PN = PATH.length;
+
+function nearestPathIndex(x, y, hint) {
+  // hint周辺を探索(高速)。hint=nullなら全探索
+  let best = -1, bd = Infinity;
+  if (hint == null) {
+    for (let i = 0; i < PN; i += 2) {
+      const dx = PATH[i].x - x, dy = PATH[i].y - y, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = i; }
+    }
+  } else {
+    for (let o = -40; o <= 40; o++) {
+      const i = (hint + o + PN) % PN;
+      const dx = PATH[i].x - x, dy = PATH[i].y - y, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = i; }
+    }
+  }
+  return best;
+}
+function pathDist(x, y, idx) {
+  const dx = PATH[idx].x - x, dy = PATH[idx].y - y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// ---------- トラックテクスチャ描画 ----------
+const trackCv = document.createElement('canvas');
+trackCv.width = TRACK_SIZE; trackCv.height = TRACK_SIZE;
+const tctx = trackCv.getContext('2d');
+const boostPads = [];   // {idx} ブーストパッドのパスインデックス
+
+(function paintTrack() {
+  const g = tctx;
+  // 草地ベース
+  g.fillStyle = '#3f9b3f';
+  g.fillRect(0, 0, TRACK_SIZE, TRACK_SIZE);
+  // 草の模様
+  for (let i = 0; i < 9000; i++) {
+    const x = Math.random() * TRACK_SIZE, y = Math.random() * TRACK_SIZE;
+    g.fillStyle = Math.random() < 0.5 ? '#38913a' : '#46a746';
+    g.fillRect(x, y, 5 + Math.random() * 8, 5 + Math.random() * 8);
+  }
+  // 湖(装飾)
+  g.fillStyle = '#3a78c8';
+  g.beginPath(); g.ellipse(1680, 1750, 200, 140, 0.4, 0, TAU); g.fill();
+  g.fillStyle = '#4a88d8';
+  g.beginPath(); g.ellipse(1680, 1750, 170, 112, 0.4, 0, TAU); g.fill();
+  // 砂地(装飾)
+  g.fillStyle = '#d8c070';
+  g.beginPath(); g.ellipse(950, 700, 180, 120, -0.3, 0, TAU); g.fill();
+
+  const roadPath = () => {
+    g.beginPath();
+    g.moveTo(PATH[0].x, PATH[0].y);
+    for (let i = 1; i < PN; i++) g.lineTo(PATH[i].x, PATH[i].y);
+    g.closePath();
+  };
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  // 縁石 (赤白)
+  roadPath();
+  g.strokeStyle = '#e04040'; g.lineWidth = ROAD_W + 16; g.stroke();
+  g.setLineDash([18, 18]);
+  roadPath();
+  g.strokeStyle = '#f0f0f0'; g.lineWidth = ROAD_W + 16; g.stroke();
+  g.setLineDash([]);
+  // 道路
+  roadPath();
+  g.strokeStyle = '#5a5a62'; g.lineWidth = ROAD_W; g.stroke();
+  // 道路の質感
+  g.save();
+  roadPath();
+  g.clip();
+  for (let i = 0; i < 4000; i++) {
+    const p = PATH[(Math.random() * PN) | 0];
+    const a = Math.random() * TAU, r = Math.random() * ROAD_W * 0.5;
+    g.fillStyle = Math.random() < 0.5 ? '#565660' : '#606068';
+    g.fillRect(p.x + Math.cos(a) * r, p.y + Math.sin(a) * r, 4, 4);
+  }
+  // センターライン (黄色破線)
+  g.setLineDash([14, 22]);
+  roadPath();
+  g.strokeStyle = '#e8c838'; g.lineWidth = 3; g.stroke();
+  g.setLineDash([]);
+  g.restore();
+
+  // ブーストパッド
+  const padIdxs = [90, 250, 410, 520];
+  for (const pi of padIdxs) {
+    boostPads.push({ idx: pi });
+    const p = PATH[pi];
+    g.save();
+    g.translate(p.x, p.y);
+    g.rotate(p.dir);
+    g.fillStyle = '#e87818';
+    g.fillRect(-28, -34, 56, 68);
+    g.fillStyle = '#ffb838';
+    for (let k = -1; k <= 1; k++) {
+      g.beginPath();
+      g.moveTo(-16 + k * 2, -22 + k * 20);
+      g.lineTo(14 + k * 2, 0 + k * 20 - 22);
+      g.lineTo(-16 + k * 2, 22 + k * 20 - 44);
+      g.closePath();
+    }
+    g.fill();
+    g.restore();
+  }
+
+  // スタートライン (チェッカー)
+  const sp = PATH[0];
+  g.save();
+  g.translate(sp.x, sp.y);
+  g.rotate(sp.dir);
+  const sq = 10;
+  for (let i = 0; i < 3; i++) {
+    for (let j = -5; j < 5; j++) {
+      g.fillStyle = (i + j) % 2 === 0 ? '#f8f8f8' : '#181818';
+      g.fillRect(-15 + i * sq, j * sq, sq, sq);
+    }
+  }
+  g.restore();
+})();
+const trackData = new Uint32Array(tctx.getImageData(0, 0, TRACK_SIZE, TRACK_SIZE).data.buffer);
+
+// ---------- 空・遠景 ----------
+const skyRow = new Uint32Array(IH);
+(function buildSky() {
+  for (let y = 0; y <= HORIZON; y++) {
+    const t = y / HORIZON;
+    skyRow[y] = mixCol(rgb(90, 160, 235), rgb(175, 220, 250), t);
+  }
+})();
+const FOG_COL = rgb(185, 220, 245);
+// 山のシルエット(パララックス用の帯)
+const hillsCv = document.createElement('canvas');
+hillsCv.width = 1440; hillsCv.height = 60;
+(function paintHills() {
+  const g = hillsCv.getContext('2d');
+  g.fillStyle = '#7fb890';
+  g.beginPath();
+  g.moveTo(0, 60);
+  for (let x = 0; x <= 1440; x += 8) {
+    const h = 26 + Math.sin(x * 0.011) * 14 + Math.sin(x * 0.037 + 2) * 8 + Math.sin(x * 0.005 + 5) * 10;
+    g.lineTo(x, 60 - h);
+  }
+  g.lineTo(1440, 60);
+  g.closePath();
+  g.fill();
+  g.fillStyle = '#6aa980';
+  for (let i = 0; i < 26; i++) {
+    const x = (i * 133.7) % 1440, h = 8 + (i * 37) % 16;
+    g.beginPath();
+    g.moveTo(x - 16, 60); g.lineTo(x, 60 - h - 12); g.lineTo(x + 16, 60);
+    g.closePath(); g.fill();
+  }
+})();
+// 雲
+const cloudCv = document.createElement('canvas');
+cloudCv.width = 96; cloudCv.height = 40;
+(function paintCloud() {
+  const g = cloudCv.getContext('2d');
+  g.fillStyle = 'rgba(255,255,255,0.9)';
+  for (const [x, y, r] of [[30, 26, 14], [50, 20, 16], [70, 26, 13], [46, 30, 15]]) {
+    g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+  }
+})();
+
+// ============================================================
+//  スプライト事前描画
+// ============================================================
+const ANGLES = 16;
+const kartSprites = [];  // [charIdx][angleIdx]
+(function buildKartSprites() {
+  for (let c = 0; c < CHARS.length; c++) {
+    const ch = CHARS[c];
+    const arr = [];
+    for (let a = 0; a < ANGLES; a++) {
+      const cv = document.createElement('canvas');
+      cv.width = 64; cv.height = 48;
+      const g = cv.getContext('2d');
+      const ang = (a / ANGLES) * TAU;  // 0 = 後ろから見た状態
+      g.save();
+      g.translate(32, 30);
+      g.scale(1, 0.62);                 // 俯瞰の潰し
+      g.rotate(ang);                    // 0 = ノーズが奥(上)向き = 後ろ姿
+      // 影
+      g.fillStyle = 'rgba(0,0,0,0.30)';
+      g.beginPath(); g.ellipse(2, 3, 21, 15, 0, 0, TAU); g.fill();
+      // タイヤ
+      g.fillStyle = '#181818';
+      for (const [tx, ty] of [[-14, -12], [14, -12], [-15, 12], [15, 12]]) {
+        g.beginPath(); g.ellipse(tx, ty, 6, 8, 0, 0, TAU); g.fill();
+      }
+      g.fillStyle = '#404040';
+      for (const [tx, ty] of [[-14, -12], [14, -12], [-15, 12], [15, 12]]) {
+        g.beginPath(); g.ellipse(tx, ty, 3, 4, 0, 0, TAU); g.fill();
+      }
+      // ボディ
+      g.fillStyle = ch.body;
+      g.beginPath(); g.ellipse(0, 0, 12, 17, 0, 0, TAU); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.28)';
+      g.beginPath(); g.ellipse(-3, -5, 6, 8, 0, 0, TAU); g.fill();
+      // フロントノーズ
+      g.fillStyle = ch.helm;
+      g.beginPath(); g.ellipse(0, -13, 6, 6, 0, 0, TAU); g.fill();
+      // ドライバー (ヘルメット + 前面バイザー)
+      g.fillStyle = ch.helm;
+      g.beginPath(); g.arc(0, 2, 6.5, 0, TAU); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.35)';
+      g.beginPath(); g.arc(-2, 0, 3, 0, TAU); g.fill();
+      g.fillStyle = '#302838';
+      g.fillRect(-4.5, -4.5, 9, 3.5);
+      g.restore();
+      arr.push(cv);
+    }
+    kartSprites.push(arr);
+  }
+})();
+
+function makeSprite(w, h, draw) {
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  draw(cv.getContext('2d'));
+  return cv;
+}
+const sprBanana = makeSprite(32, 32, g => {
+  g.fillStyle = 'rgba(0,0,0,0.25)';
+  g.beginPath(); g.ellipse(16, 27, 10, 4, 0, 0, TAU); g.fill();
+  g.fillStyle = '#f0d020';
+  g.beginPath();
+  g.moveTo(8, 24); g.quadraticCurveTo(4, 10, 14, 6);
+  g.quadraticCurveTo(16, 12, 14, 16); g.quadraticCurveTo(14, 22, 24, 24);
+  g.quadraticCurveTo(16, 28, 8, 24);
+  g.fill();
+  g.fillStyle = '#806010';
+  g.fillRect(13, 5, 4, 4);
+});
+const sprShellG = makeSprite(32, 32, g => {
+  g.fillStyle = 'rgba(0,0,0,0.25)';
+  g.beginPath(); g.ellipse(16, 27, 10, 4, 0, 0, TAU); g.fill();
+  g.fillStyle = '#f8f8f0';
+  g.beginPath(); g.ellipse(16, 20, 12, 7, 0, 0, TAU); g.fill();
+  g.fillStyle = '#30a838';
+  g.beginPath(); g.arc(16, 15, 11, 0, TAU); g.fill();
+  g.strokeStyle = '#1f7a26'; g.lineWidth = 2;
+  g.beginPath(); g.arc(16, 15, 8, 0, TAU); g.stroke();
+  g.fillStyle = 'rgba(255,255,255,0.5)';
+  g.beginPath(); g.arc(12, 11, 3.5, 0, TAU); g.fill();
+});
+const sprShellR = makeSprite(32, 32, g => {
+  g.drawImage(sprShellG, 0, 0);
+  g.globalCompositeOperation = 'source-atop';
+  g.fillStyle = 'rgba(220,40,30,0.75)';
+  g.fillRect(0, 0, 32, 20);
+  g.globalCompositeOperation = 'source-over';
+});
+const sprMush = makeSprite(32, 32, g => {
+  g.fillStyle = '#f8e8d0';
+  g.fillRect(11, 18, 10, 9);
+  g.fillStyle = '#e83828';
+  g.beginPath(); g.arc(16, 14, 12, Math.PI, TAU); g.fill();
+  g.fillRect(4, 12, 24, 5);
+  g.fillStyle = '#fff';
+  g.beginPath(); g.arc(16, 8, 4, 0, TAU); g.fill();
+  g.beginPath(); g.arc(7, 13, 3, 0, TAU); g.fill();
+  g.beginPath(); g.arc(25, 13, 3, 0, TAU); g.fill();
+});
+const sprCoin = makeSprite(24, 24, g => {
+  g.fillStyle = '#c89818';
+  g.beginPath(); g.ellipse(12, 12, 9, 11, 0, 0, TAU); g.fill();
+  g.fillStyle = '#f8d838';
+  g.beginPath(); g.ellipse(11, 11, 8, 10, 0, 0, TAU); g.fill();
+  g.fillStyle = '#c89818';
+  g.font = 'bold 13px sans-serif'; g.textAlign = 'center';
+  g.fillText('C', 11, 16);
+});
+
+// ============================================================
+//  サウンド (WebAudio)
+// ============================================================
+let audio = null, muted = false;
+function initAudio() {
+  if (audio) return;
+  const ac = new (window.AudioContext || window.webkitAudioContext)();
+  const master = ac.createGain(); master.gain.value = 0.5; master.connect(ac.destination);
+  // エンジン音
+  const eng = ac.createOscillator(); eng.type = 'sawtooth'; eng.frequency.value = 50;
+  const engGain = ac.createGain(); engGain.gain.value = 0;
+  const engFilt = ac.createBiquadFilter(); engFilt.type = 'lowpass'; engFilt.frequency.value = 400;
+  eng.connect(engFilt); engFilt.connect(engGain); engGain.connect(master);
+  eng.start();
+  audio = { ac, master, eng, engGain };
+}
+function sfx(freq, dur, type = 'square', vol = 0.25, slide = 0) {
+  if (!audio || muted) return;
+  const { ac, master } = audio;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  if (slide) o.frequency.linearRampToValueAtTime(freq + slide, ac.currentTime + dur);
+  g.gain.setValueAtTime(vol, ac.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+  o.connect(g); g.connect(master);
+  o.start(); o.stop(ac.currentTime + dur);
+}
+function updateEngine(speed, boosting) {
+  if (!audio) return;
+  const t = audio.ac.currentTime;
+  audio.eng.frequency.setTargetAtTime(45 + speed * 28 + (boosting ? 40 : 0), t, 0.05);
+  audio.engGain.gain.setTargetAtTime(muted || state !== 'race' ? 0 : 0.05 + speed * 0.012, t, 0.1);
+}
+// 簡易BGM
+const BGM_MELODY = [0, 4, 7, 12, 7, 4, 0, -5, -1, 2, 7, 2, -1, -5, 0, 4, 7, 12, 14, 12, 7, 4, 5, 9, 12, 9, 5, 2, 4, 7, 4, 0];
+let bgmStep = 0, bgmNext = 0;
+function updateBGM() {
+  if (!audio || muted || state !== 'race') return;
+  const t = audio.ac.currentTime;
+  if (t >= bgmNext) {
+    if (bgmNext < t - 1) bgmNext = t;
+    const n = BGM_MELODY[bgmStep % BGM_MELODY.length];
+    sfx(440 * Math.pow(2, (n - 9) / 12), 0.12, 'square', 0.05);
+    if (bgmStep % 2 === 0) sfx(110 * Math.pow(2, ((bgmStep % 8 < 4 ? 0 : -5)) / 12), 0.14, 'triangle', 0.09);
+    bgmStep++;
+    bgmNext += 0.155;
+  }
+}
+
+// ============================================================
+//  入力
+// ============================================================
+const keys = {};
+window.addEventListener('keydown', e => {
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
+  keys[e.key.toLowerCase()] = true;
+  handleKeyPress(e.key.toLowerCase());
+  initAudio();
+});
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+const input = { accel: false, brake: false, left: false, right: false, drift: false, item: false };
+let prevDrift = false, prevItem = false;
+
+// タッチ操作
+const touchState = { left: false, right: false, drift: false, item: false, any: false };
+let isTouch = false;
+const touchBtns = [];  // 画面座標で毎フレーム更新
+function pollTouches(e) {
+  isTouch = true;
+  touchState.left = touchState.right = touchState.drift = touchState.item = false;
+  touchState.any = e.touches.length > 0;
+  for (const t of e.touches) {
+    const r = canvas.getBoundingClientRect();
+    const x = t.clientX - r.left, y = t.clientY - r.top;
+    for (const b of touchBtns) {
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) touchState[b.id] = true;
+    }
+  }
+}
+canvas.addEventListener('touchstart', e => { e.preventDefault(); initAudio(); pollTouches(e); tapAnywhere(); }, { passive: false });
+canvas.addEventListener('touchmove', e => { e.preventDefault(); pollTouches(e); }, { passive: false });
+canvas.addEventListener('touchend', e => { e.preventDefault(); pollTouches(e); }, { passive: false });
+canvas.addEventListener('mousedown', () => { initAudio(); tapAnywhere(); });
+
+function readInput() {
+  // タッチ端末はオートアクセル
+  input.accel = keys['arrowup'] || keys['w'] || (isTouch && state === 'race');
+  input.brake = keys['arrowdown'] || keys['s'];
+  input.left = keys['arrowleft'] || keys['a'] || touchState.left;
+  input.right = keys['arrowright'] || keys['d'] || touchState.right;
+  input.drift = keys[' '] || touchState.drift;
+  input.item = keys['shift'] || keys['e'] || touchState.item;
+}
+
+// ============================================================
+//  ゲーム状態
+// ============================================================
+let state = 'title';        // title / select / race / finished
+let selCursor = 0;
+let karts = [];
+let player = null;
+let items = [];             // 走行中のアイテム { type,x,y,dir,speed,life,owner,pathIdx,target }
+let itemBoxes = [];         // { x,y,respawn }
+let coins = [];             // { x,y,respawn }
+let particles = [];
+let raceTime = 0, countdown = 0, finishOrder = [];
+let camX = 0, camY = 0, camDir = 0;
+let frameCount = 0;
+
+function makeKart(charIdx, isPlayer, gridPos) {
+  // スタートライン後方にグリッド配置
+  const backIdx = (PN - 8 - gridPos * 7 + PN) % PN;
+  const p = PATH[backIdx];
+  const side = (gridPos % 2 === 0 ? -1 : 1) * 24;
+  const nx = -Math.sin(p.dir), ny = Math.cos(p.dir);
+  return {
+    charIdx, isPlayer,
+    x: p.x + nx * side, y: p.y + ny * side,
+    dir: p.dir, speed: 0, z: 0, zv: 0,
+    pathIdx: backIdx, prevPathIdx: backIdx, lap: 1,
+    drift: 0, driftCharge: 0, hopT: 0,
+    boost: 0, spin: 0, item: null, rouletteT: 0,
+    coins: 0, rank: 1, finished: false, finishTime: 0,
+    aiLane: (Math.random() - 0.5) * 40,
+    aiItemT: 200 + Math.random() * 400,
+    steerVis: 0,
+    progress: backIdx - PN,   // スタートライン基準の連続進行度(ライン手前は負)
+  };
+}
+
+function startRace(playerChar) {
+  const order = [playerChar];
+  for (let i = 0; i < CHARS.length; i++) if (i !== playerChar) order.push(i);
+  // グリッド割当: プレイヤー最後尾、AIは前
+  karts = [];
+  for (let i = 0; i < KART_COUNT; i++) {
+    const isP = i === 0;
+    const grid = isP ? KART_COUNT - 1 : i - 1;
+    karts.push(makeKart(order[i], isP, grid));
+  }
+  player = karts[0];
+  items = [];
+  particles = [];
+  finishOrder = [];
+  raceTime = 0;
+  countdown = 240;      // 4秒 (3,2,1,GO)
+  frameCount = 0;
+  // アイテムボックス配置
+  itemBoxes = [];
+  for (const base of [60, 200, 330, 470, 560]) {
+    for (const off of [-32, 0, 32]) {
+      const p = PATH[base % PN];
+      const nx = -Math.sin(p.dir), ny = Math.cos(p.dir);
+      itemBoxes.push({ x: p.x + nx * off, y: p.y + ny * off, respawn: 0 });
+    }
+  }
+  // コイン配置
+  coins = [];
+  for (let i = 30; i < PN; i += 45) {
+    if ([60, 200, 330, 470, 560].some(b => Math.abs(b - i) < 18)) continue;
+    const p = PATH[i];
+    const nx = -Math.sin(p.dir), ny = Math.cos(p.dir);
+    const off = ((i * 7) % 3 - 1) * 26;
+    for (let j = -1; j <= 1; j++) {
+      const q = PATH[(i + j * 4 + PN) % PN];
+      coins.push({ x: q.x + nx * off, y: q.y + ny * off, respawn: 0 });
+    }
+  }
+  // カメラ初期化
+  camDir = player.dir;
+  camX = player.x - Math.cos(camDir) * CAM_BACK;
+  camY = player.y - Math.sin(camDir) * CAM_BACK;
+  state = 'race';
+  bgmStep = 0; bgmNext = 0;
+}
+
+function handleKeyPress(k) {
+  if (state === 'title') {
+    if (k === 'enter' || k === ' ') { state = 'select'; sfx(660, 0.1); }
+  } else if (state === 'select') {
+    if (k === 'arrowleft' || k === 'a') { selCursor = (selCursor + CHARS.length - 1) % CHARS.length; sfx(440, 0.06); }
+    if (k === 'arrowright' || k === 'd') { selCursor = (selCursor + 1) % CHARS.length; sfx(440, 0.06); }
+    if (k === 'arrowup' || k === 'w') { selCursor = (selCursor + CHARS.length - 3) % CHARS.length; sfx(440, 0.06); }
+    if (k === 'arrowdown' || k === 's') { selCursor = (selCursor + 3) % CHARS.length; sfx(440, 0.06); }
+    if (k === 'enter' || k === ' ') { sfx(880, 0.15); startRace(selCursor); }
+  } else if (state === 'finished') {
+    if (k === 'enter' || k === ' ' || k === 'r') { state = 'select'; sfx(660, 0.1); }
+  } else if (state === 'race') {
+    if (k === 'r') startRace(player.charIdx);
+  }
+  if (k === 'm') { muted = !muted; }
+}
+function tapAnywhere() {
+  // キャラ選択画面のタップは click ハンドラ側で座標判定する
+  if (state === 'title') { state = 'select'; sfx(660, 0.1); return; }
+  if (state === 'finished') { state = 'select'; sfx(660, 0.1); return; }
+}
+canvas.addEventListener('click', e => {
+  if (state !== 'select') return;
+  const r = canvas.getBoundingClientRect();
+  const x = (e.clientX - r.left) / dispW * IW, y = (e.clientY - r.top) / dispH * IH;
+  for (let i = 0; i < CHARS.length; i++) {
+    const bx = 60 + (i % 3) * 130, by = 92 + Math.floor(i / 3) * 74;
+    if (x >= bx - 45 && x <= bx + 85 && y >= by - 30 && y <= by + 34) {
+      if (selCursor === i) { sfx(880, 0.15); startRace(selCursor); }
+      else { selCursor = i; sfx(440, 0.06); }
+      return;
+    }
+  }
+  // 決定ボタン
+  if (y > 232) { sfx(880, 0.15); startRace(selCursor); }
+});
+
+// ============================================================
+//  アイテム
+// ============================================================
+const ITEM_TYPES = ['mushroom', 'banana', 'greenShell', 'redShell'];
+function rollItem(rank) {
+  // 順位が低いほど良いアイテム
+  const r = Math.random();
+  if (rank <= 2) {
+    return r < 0.40 ? 'banana' : r < 0.75 ? 'greenShell' : 'mushroom';
+  } else if (rank <= 4) {
+    return r < 0.25 ? 'banana' : r < 0.5 ? 'greenShell' : r < 0.75 ? 'redShell' : 'mushroom';
+  }
+  return r < 0.45 ? 'mushroom' : r < 0.75 ? 'redShell' : 'greenShell';
+}
+function useItem(k) {
+  if (!k.item || k.rouletteT > 0) return;
+  const t = k.item; k.item = null;
+  if (t === 'mushroom') {
+    k.boost = Math.max(k.boost, 50);
+    if (k.isPlayer) sfx(300, 0.35, 'sawtooth', 0.3, 500);
+  } else if (t === 'banana') {
+    const bx = k.x - Math.cos(k.dir) * 26, by = k.y - Math.sin(k.dir) * 26;
+    items.push({ type: 'banana', x: bx, y: by, dir: 0, speed: 0, life: 3600, age: 0, owner: k });
+    if (k.isPlayer) sfx(220, 0.1, 'square', 0.2);
+  } else if (t === 'greenShell') {
+    items.push({
+      type: 'greenShell', x: k.x + Math.cos(k.dir) * 24, y: k.y + Math.sin(k.dir) * 24,
+      dir: k.dir, speed: 7, life: 500, age: 0, owner: k, bounces: 0,
+      pathIdx: k.pathIdx,
+    });
+    if (k.isPlayer) sfx(500, 0.12, 'square', 0.25, -200);
+  } else if (t === 'redShell') {
+    // 1つ前の順位のカートを狙う
+    let target = null;
+    for (const o of karts) if (o.rank === k.rank - 1) target = o;
+    items.push({
+      type: 'redShell', x: k.x + Math.cos(k.dir) * 24, y: k.y + Math.sin(k.dir) * 24,
+      dir: k.dir, speed: 6.5, life: 700, age: 0, owner: k, target,
+      pathIdx: k.pathIdx,
+    });
+    if (k.isPlayer) sfx(560, 0.12, 'square', 0.25, -200);
+  }
+}
+function spinKart(k, cause) {
+  if (k.spin > 0 || k.boost > 30) return;
+  k.spin = 55;
+  k.speed *= 0.25;
+  k.driftCharge = 0; k.drift = 0;
+  if (k.coins > 0) k.coins = Math.max(0, k.coins - 3);
+  if (k.isPlayer) sfx(160, 0.4, 'sawtooth', 0.35, -100);
+  for (let i = 0; i < 10; i++) {
+    particles.push({
+      x: k.x, y: k.y, z: 8,
+      vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3, vz: Math.random() * 2 + 1,
+      life: 30, col: '#f0e030', size: 3,
+    });
+  }
+}
+
+// ============================================================
+//  カート更新
+// ============================================================
+function updateKart(k) {
+  const ch = CHARS[k.charIdx];
+  const racing = countdown <= 0 && !k.finished;
+
+  // 入力取得
+  let accel = false, brake = false, steer = 0, wantDrift = false, wantItem = false;
+  if (k.isPlayer) {
+    accel = input.accel && racing;
+    brake = input.brake && racing;
+    steer = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    wantDrift = input.drift;
+    wantItem = input.item && !prevItem;
+    if (k.finished) accel = true;  // ゴール後は自動走行
+  } else {
+    // ---------- AI ----------
+    accel = racing || k.finished;
+    const look = 8 + Math.min(8, Math.floor(k.speed * 2));
+    const tp = PATH[(k.pathIdx + look) % PN];
+    const nx = -Math.sin(tp.dir), ny = Math.cos(tp.dir);
+    // コースアウト気味ならセンターを狙う
+    const lane = pathDist(k.x, k.y, k.pathIdx) > 38 ? 0 : k.aiLane;
+    const tx = tp.x + nx * lane, ty = tp.y + ny * lane;
+    const want = Math.atan2(ty - k.y, tx - k.x);
+    const d = angDiff(k.dir, want);
+    steer = clamp(d * 3.2, -1, 1);
+    // コーナー手前で減速 (先のパス方向との角度差で判定)
+    const ahead = PATH[(k.pathIdx + 16) % PN];
+    const curve = Math.abs(angDiff(PATH[k.pathIdx].dir, ahead.dir));
+    k.aiSlow = clamp(1.05 - curve * 0.55, 0.74, 1);
+    // レーン変更
+    if (frameCount % 120 === 0 && Math.random() < 0.4) k.aiLane = (Math.random() - 0.5) * 30;
+    // バナナ回避 (簡易): 前方のバナナを検知したらレーン変更
+    for (const it of items) {
+      if (it.type !== 'banana') continue;
+      const ddx = it.x - k.x, ddy = it.y - k.y;
+      const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+      if (dist < 90 && Math.abs(angDiff(k.dir, Math.atan2(ddy, ddx))) < 0.4) {
+        k.aiLane = k.aiLane > 0 ? -40 : 40;
+      }
+    }
+    // アイテム使用
+    if (racing && k.item && k.rouletteT <= 0) {
+      k.aiItemT--;
+      if (k.aiItemT <= 0) { wantItem = true; k.aiItemT = 250 + Math.random() * 400; }
+    }
+  }
+
+  // ---------- ハンドリング ----------
+  const speedRatio = clamp(Math.abs(k.speed) / ch.speed, 0, 1);
+
+  // ホップ&ドリフト
+  if (k.isPlayer) {
+    if (wantDrift && !prevDrift && k.z === 0 && k.speed > 1.6) {
+      k.zv = 2.6; k.hopT = 12;
+      sfx(340, 0.1, 'square', 0.15, 120);
+    }
+    if (k.hopT > 0) {
+      k.hopT--;
+      if (steer !== 0 && wantDrift && k.drift === 0) { k.drift = steer; k.driftCharge = 0; }
+    }
+    if (k.drift !== 0) {
+      if (!wantDrift || k.speed < 1.2) {
+        // ドリフト解除 → ミニターボ
+        if (k.driftCharge > 190) { k.boost = Math.max(k.boost, 42); sfx(320, 0.3, 'sawtooth', 0.3, 480); }
+        else if (k.driftCharge > 90) { k.boost = Math.max(k.boost, 22); sfx(280, 0.22, 'sawtooth', 0.25, 380); }
+        k.drift = 0; k.driftCharge = 0;
+      } else {
+        k.driftCharge += 1 + Math.abs(steer) * 0.6;
+      }
+    }
+  } else {
+    // AIもコーナーで軽くドリフト表現(チャージのみ)
+    k.drift = 0;
+  }
+
+  // 重力(ホップ)
+  if (k.z > 0 || k.zv !== 0) {
+    k.z += k.zv; k.zv -= 0.45;
+    if (k.z <= 0) { k.z = 0; k.zv = 0; }
+  }
+
+  // ステア
+  let turn = 0;
+  if (k.drift !== 0) {
+    turn = k.drift * (ch.handling * 1.35) + steer * ch.handling * 0.75;
+  } else {
+    turn = steer * ch.handling * (0.35 + 0.65 * speedRatio);
+    if (!k.isPlayer) turn *= 1.7;   // AIは曲がりやすくして走破性を確保
+  }
+  if (k.spin > 0) turn = 0;
+  k.dir += turn * (k.speed >= 0 ? 1 : -1);
+  k.steerVis = lerp(k.steerVis, k.drift !== 0 ? k.drift * 1.6 : steer, 0.2);
+
+  // ---------- 速度 ----------
+  let maxSp = ch.speed + k.coins * 0.02;
+  if (k.boost > 0) { maxSp += 1.6; k.boost--; }
+  if (!k.isPlayer) {
+    // ラバーバンド: プレイヤーとの差に応じて調整
+    const gap = k.progress - player.progress;
+    maxSp *= clamp(1 - gap / 2600 * 0.11, 0.86, 1.09);
+    maxSp *= k.aiSlow || 1;
+  }
+  // 路面判定
+  k.pathIdx = nearestPathIndex(k.x, k.y, k.pathIdx);
+  const roadDist = pathDist(k.x, k.y, k.pathIdx);
+  const offRoad = roadDist > ROAD_W / 2 + 6;
+  if (offRoad && k.boost <= 0) maxSp = Math.min(maxSp, 1.6);
+
+  if (k.spin > 0) {
+    k.spin--;
+    k.speed *= 0.96;
+  } else if (accel) {
+    k.speed += (maxSp - k.speed) * (k.speed < maxSp ? 0.035 : 0.08);
+  } else if (brake) {
+    k.speed -= 0.12;
+    if (k.speed < -1.6) k.speed = -1.6;
+  } else {
+    k.speed *= 0.982;
+  }
+  if (offRoad && k.speed > maxSp) k.speed = lerp(k.speed, maxSp, 0.15);
+
+  // ブーストパッド
+  for (const bp of boostPads) {
+    const di = Math.abs(((k.pathIdx - bp.idx + PN + PN / 2) % PN) - PN / 2);
+    if (di < 4 && roadDist < 40 && k.z === 0) {
+      if (k.boost < 28) { k.boost = 28; if (k.isPlayer) sfx(360, 0.3, 'sawtooth', 0.28, 420); }
+    }
+  }
+
+  // ---------- 移動 ----------
+  let moveDir = k.dir;
+  if (k.drift !== 0) moveDir -= k.drift * 0.30;   // ドリフトのスライド
+  if (k.spin > 0) moveDir = k.dir;                // スピン中は現状維持
+  k.x += Math.cos(moveDir) * k.speed;
+  k.y += Math.sin(moveDir) * k.speed;
+  k.x = clamp(k.x, 8, TRACK_SIZE - 8);
+  k.y = clamp(k.y, 8, TRACK_SIZE - 8);
+
+  // ---------- 周回・進行度 (連続カウンタで折り返しズレなし) ----------
+  const dIdx = (((k.pathIdx - k.prevPathIdx + PN / 2) % PN) + PN) % PN - PN / 2;
+  k.progress += dIdx;
+  k.prevPathIdx = k.pathIdx;
+  const newLap = Math.max(1, Math.floor(k.progress / PN) + 1);
+  if (newLap > k.lap) {
+    k.lap = newLap;
+    if (k.isPlayer && k.lap <= LAPS) sfx(880, 0.2, 'square', 0.25);
+  }
+  if (k.progress >= LAPS * PN && !k.finished) {
+    k.finished = true;
+    k.finishTime = raceTime;
+    finishOrder.push(k);
+    if (k.isPlayer) {
+      sfx(660, 0.15); setTimeout(() => sfx(880, 0.15), 150); setTimeout(() => sfx(1100, 0.3), 300);
+      setTimeout(() => { state = 'finished'; }, 2200);
+    }
+  }
+
+  // ---------- アイテム使用 ----------
+  if (wantItem && racing) useItem(k);
+
+  // ---------- アイテムボックス ----------
+  for (const b of itemBoxes) {
+    if (b.respawn > 0) continue;
+    const dx = b.x - k.x, dy = b.y - k.y;
+    if (dx * dx + dy * dy < 22 * 22) {
+      b.respawn = 150;
+      if (!k.item && k.rouletteT <= 0) {
+        k.rouletteT = 55;
+        if (k.isPlayer) sfx(700, 0.1, 'square', 0.2, 300);
+      }
+    }
+  }
+  if (k.rouletteT > 0) {
+    k.rouletteT--;
+    if (k.rouletteT === 0) {
+      k.item = rollItem(k.rank);
+      if (k.isPlayer) sfx(900, 0.12, 'square', 0.2);
+    }
+  }
+
+  // ---------- コイン ----------
+  for (const c of coins) {
+    if (c.respawn > 0) continue;
+    const dx = c.x - k.x, dy = c.y - k.y;
+    if (dx * dx + dy * dy < 18 * 18 && k.coins < 10) {
+      c.respawn = 600;
+      k.coins++;
+      if (k.isPlayer) sfx(1200, 0.08, 'square', 0.15, 300);
+    }
+  }
+
+  // ---------- ドリフトの火花 ----------
+  if (k.drift !== 0 && k.z === 0 && frameCount % 2 === 0) {
+    const col = k.driftCharge > 190 ? '#ff9020' : k.driftCharge > 90 ? '#40c0ff' : '#ffe860';
+    const bx = k.x - Math.cos(k.dir) * 14, by = k.y - Math.sin(k.dir) * 14;
+    particles.push({
+      x: bx + (Math.random() - 0.5) * 10, y: by + (Math.random() - 0.5) * 10, z: 2,
+      vx: -Math.cos(moveDir) * 1.5, vy: -Math.sin(moveDir) * 1.5, vz: Math.random() * 1.5,
+      life: 14, col, size: 2.5,
+    });
+  }
+  // ブースト炎
+  if (k.boost > 0 && frameCount % 2 === 0) {
+    const bx = k.x - Math.cos(k.dir) * 16, by = k.y - Math.sin(k.dir) * 16;
+    particles.push({
+      x: bx, y: by, z: 4,
+      vx: -Math.cos(k.dir) * 2 + (Math.random() - 0.5), vy: -Math.sin(k.dir) * 2 + (Math.random() - 0.5), vz: 0.5,
+      life: 12, col: Math.random() < 0.5 ? '#ff8020' : '#ffd040', size: 3,
+    });
+  }
+  // オフロードの土煙
+  if (offRoad && Math.abs(k.speed) > 0.8 && frameCount % 3 === 0) {
+    particles.push({
+      x: k.x - Math.cos(k.dir) * 10, y: k.y - Math.sin(k.dir) * 10, z: 2,
+      vx: (Math.random() - 0.5) * 1.5, vy: (Math.random() - 0.5) * 1.5, vz: Math.random(),
+      life: 18, col: '#8a7a50', size: 3,
+    });
+  }
+}
+
+// カート同士の衝突
+function kartCollisions() {
+  for (let i = 0; i < karts.length; i++) {
+    for (let j = i + 1; j < karts.length; j++) {
+      const a = karts[i], b = karts[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d2 = dx * dx + dy * dy;
+      const min = 22;
+      if (d2 < min * min && d2 > 0.01) {
+        const d = Math.sqrt(d2), push = (min - d) / 2;
+        const ux = dx / d, uy = dy / d;
+        a.x -= ux * push; a.y -= uy * push;
+        b.x += ux * push; b.y += uy * push;
+        const tmp = a.speed;
+        a.speed = lerp(a.speed, b.speed, 0.3);
+        b.speed = lerp(b.speed, tmp, 0.3);
+      }
+    }
+  }
+}
+
+// ============================================================
+//  投擲アイテム更新
+// ============================================================
+function updateItems() {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    it.life--; it.age++;
+    if (it.life <= 0) { items.splice(i, 1); continue; }
+
+    if (it.type === 'greenShell' || it.type === 'redShell') {
+      if (it.type === 'redShell') {
+        it.pathIdx = nearestPathIndex(it.x, it.y, it.pathIdx);
+        if (it.target && !it.target.finished) {
+          const dx = it.target.x - it.x, dy = it.target.y - it.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 220) {
+            // 直接ホーミング
+            const want = Math.atan2(dy, dx);
+            it.dir += clamp(angDiff(it.dir, want), -0.09, 0.09);
+          } else {
+            // コースに沿って追跡
+            const tp = PATH[(it.pathIdx + 12) % PN];
+            const want = Math.atan2(tp.y - it.y, tp.x - it.x);
+            it.dir += clamp(angDiff(it.dir, want), -0.12, 0.12);
+          }
+        } else {
+          const tp = PATH[(it.pathIdx + 12) % PN];
+          const want = Math.atan2(tp.y - it.y, tp.x - it.x);
+          it.dir += clamp(angDiff(it.dir, want), -0.12, 0.12);
+        }
+      }
+      it.x += Math.cos(it.dir) * it.speed;
+      it.y += Math.sin(it.dir) * it.speed;
+      // 緑こうらは道路端で跳ね返る
+      if (it.type === 'greenShell') {
+        it.pathIdx = nearestPathIndex(it.x, it.y, it.pathIdx);
+        const d = pathDist(it.x, it.y, it.pathIdx);
+        if (d > ROAD_W / 2 + 4) {
+          const p = PATH[it.pathIdx];
+          const nx = it.x - p.x, ny = it.y - p.y;
+          const nl = Math.sqrt(nx * nx + ny * ny) || 1;
+          const ux = nx / nl, uy = ny / nl;
+          const dot = Math.cos(it.dir) * ux + Math.sin(it.dir) * uy;
+          const rx = Math.cos(it.dir) - 2 * dot * ux, ry = Math.sin(it.dir) - 2 * dot * uy;
+          it.dir = Math.atan2(ry, rx);
+          it.x = p.x + ux * (ROAD_W / 2 + 2);
+          it.y = p.y + uy * (ROAD_W / 2 + 2);
+          it.bounces++;
+          sfx(200, 0.06, 'square', 0.12);
+          if (it.bounces > 4) { items.splice(i, 1); continue; }
+        }
+      }
+    }
+
+    // カートとの衝突
+    let hit = false;
+    for (const k of karts) {
+      if (it.owner === k && it.age < 30) continue;
+      const dx = k.x - it.x, dy = k.y - it.y;
+      if (dx * dx + dy * dy < 18 * 18 && k.z < 6) {
+        spinKart(k);
+        hit = true;
+        break;
+      }
+    }
+    if (hit) { items.splice(i, 1); continue; }
+  }
+  // リスポーン
+  for (const b of itemBoxes) if (b.respawn > 0) b.respawn--;
+  for (const c of coins) if (c.respawn > 0) c.respawn--;
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.z += p.vz; p.vz -= 0.12;
+    if (p.z < 0) p.z = 0;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ============================================================
+//  レース全体更新
+// ============================================================
+function updateRace() {
+  readInput();
+
+  if (countdown > 0) {
+    const prev = countdown;
+    countdown--;
+    const sec = Math.ceil(countdown / 60);
+    if (Math.ceil(prev / 60) !== sec) {
+      if (sec > 0) sfx(440, 0.15, 'square', 0.3);
+      else sfx(880, 0.4, 'square', 0.35);
+    }
+    // ロケットスタート判定
+    if (countdown === 0 && input.accel) {
+      // カウントダウン終了間際に加速していたらブースト
+      player.boost = 30;
+    }
+  } else {
+    raceTime++;
+  }
+
+  for (const k of karts) updateKart(k);
+  kartCollisions();
+  updateItems();
+  updateParticles();
+
+  // 順位計算
+  const sorted = [...karts].sort((a, b) => {
+    if (a.finished && b.finished) return a.finishTime - b.finishTime;
+    if (a.finished) return -1;
+    if (b.finished) return 1;
+    return b.progress - a.progress;
+  });
+  sorted.forEach((k, i) => { k.rank = i + 1; });
+
+  // カメラ
+  const targetDir = player.dir + (player.drift !== 0 ? -player.drift * 0.18 : 0);
+  camDir += angDiff(camDir, targetDir) * 0.14;
+  camX = player.x - Math.cos(camDir) * CAM_BACK;
+  camY = player.y - Math.sin(camDir) * CAM_BACK;
+
+  prevDrift = input.drift;
+  prevItem = input.item;
+
+  updateEngine(Math.abs(player.speed), player.boost > 0);
+  updateBGM();
+}
+
+// ============================================================
+//  描画
+// ============================================================
+function renderFloor() {
+  const cos = Math.cos(camDir), sin = Math.sin(camDir);
+  const rx = -sin, ry = cos;
+  // 空
+  for (let y = 0; y <= HORIZON; y++) {
+    const c = skyRow[y];
+    const o = y * IW;
+    for (let x = 0; x < IW; x++) fb[o + x] = c;
+  }
+  // 地面
+  for (let y = HORIZON + 1; y < IH; y++) {
+    const z = CAM_H * FOCAL / (y - HORIZON);
+    const o = y * IW;
+    if (z > VIEW_MAX) {
+      for (let x = 0; x < IW; x++) fb[o + x] = FOG_COL;
+      continue;
+    }
+    const fog = z > FOG_START ? (z - FOG_START) / (VIEW_MAX - FOG_START) : 0;
+    const cxw = camX + cos * z, cyw = camY + sin * z;
+    const stepX = rx * z / FOCAL, stepY = ry * z / FOCAL;
+    let wx = cxw - stepX * (IW / 2), wy = cyw - stepY * (IW / 2);
+    for (let x = 0; x < IW; x++) {
+      const ix = wx | 0, iy = wy | 0;
+      let c;
+      if (ix >= 0 && ix < TRACK_SIZE && iy >= 0 && iy < TRACK_SIZE) {
+        c = trackData[(iy << 11) | ix];
+      } else {
+        c = ((ix ^ iy) & 32) ? 0xff3a8a3a : 0xff379037;
+      }
+      if (fog > 0) c = mixCol(c, FOG_COL, fog);
+      fb[o + x] = c;
+      wx += stepX; wy += stepY;
+    }
+  }
+  ictx.putImageData(frame, 0, 0);
+  // 遠景の山 (パララックス)
+  const hw = hillsCv.width;
+  let hx = -((camDir / TAU) * hw * 2 % hw);
+  if (hx > 0) hx -= hw;
+  ictx.drawImage(hillsCv, hx, HORIZON - 59);
+  ictx.drawImage(hillsCv, hx + hw, HORIZON - 59);
+  // 雲
+  for (let i = 0; i < 4; i++) {
+    let cx = -((camDir / TAU) * hw * 1.2 % hw) + i * 260 + 40;
+    cx = ((cx % (hw + 200)) + hw + 200) % (hw + 200) - 100;
+    ictx.drawImage(cloudCv, cx, 12 + (i % 2) * 22);
+  }
+}
+
+// ワールド座標→スクリーン投影
+function project(wx, wy, wz) {
+  const cos = Math.cos(camDir), sin = Math.sin(camDir);
+  const dx = wx - camX, dy = wy - camY;
+  const dz = dx * cos + dy * sin;
+  if (dz < 10 || dz > VIEW_MAX) return null;
+  const lat = dx * -sin + dy * cos;
+  const scale = FOCAL / dz;
+  return {
+    x: IW / 2 + lat * scale,
+    y: HORIZON + CAM_H * scale - wz * scale,
+    scale, dz,
+  };
+}
+
+function renderSprites() {
+  const list = [];
+  // カート
+  for (const k of karts) {
+    const p = project(k.x, k.y, k.z);
+    if (!p) continue;
+    let rel = k.dir - camDir;
+    if (k.spin > 0) rel += k.spin * 0.25;   // スピン回転
+    else if (k.isPlayer) rel += k.steerVis * 0.25;
+    let ai = Math.round(((rel % TAU) + TAU) % TAU / TAU * ANGLES) % ANGLES;
+    list.push({ dz: p.dz, draw: () => {
+      const img = kartSprites[k.charIdx][ai];
+      const w = 36 * p.scale, h = w * (48 / 64);
+      ictx.drawImage(img, p.x - w / 2, p.y - h * 0.78, w, h);
+    }});
+  }
+  // アイテムボックス
+  for (const b of itemBoxes) {
+    if (b.respawn > 0) continue;
+    const bob = Math.sin(frameCount * 0.08 + b.x) * 2 + 8;
+    const p = project(b.x, b.y, bob);
+    if (!p) continue;
+    list.push({ dz: p.dz, draw: () => {
+      const s = 20 * p.scale;
+      const hue = (frameCount * 3 + b.x) % 360;
+      ictx.save();
+      ictx.translate(p.x, p.y);
+      ictx.rotate(frameCount * 0.03);
+      ictx.fillStyle = `hsla(${hue},85%,60%,0.85)`;
+      ictx.fillRect(-s / 2, -s / 2, s, s);
+      ictx.strokeStyle = `hsla(${hue},90%,80%,0.9)`;
+      ictx.lineWidth = Math.max(1, s * 0.08);
+      ictx.strokeRect(-s / 2, -s / 2, s, s);
+      ictx.fillStyle = 'rgba(255,255,255,0.9)';
+      ictx.font = `bold ${Math.max(6, s * 0.6)}px sans-serif`;
+      ictx.textAlign = 'center'; ictx.textBaseline = 'middle';
+      ictx.fillText('?', 0, 1);
+      ictx.restore();
+    }});
+  }
+  // コイン
+  for (const c of coins) {
+    if (c.respawn > 0) continue;
+    const p = project(c.x, c.y, 6 + Math.sin(frameCount * 0.1 + c.x) * 1.5);
+    if (!p || p.dz > 500) continue;
+    list.push({ dz: p.dz, draw: () => {
+      const s = 11 * p.scale;
+      const squash = Math.abs(Math.cos(frameCount * 0.06 + c.x * 0.1));
+      ictx.drawImage(sprCoin, p.x - s * squash / 2, p.y - s, s * squash, s);
+    }});
+  }
+  // 投擲アイテム
+  for (const it of items) {
+    const p = project(it.x, it.y, 4);
+    if (!p) continue;
+    const img = it.type === 'banana' ? sprBanana : it.type === 'redShell' ? sprShellR : sprShellG;
+    list.push({ dz: p.dz, draw: () => {
+      const s = 18 * p.scale;
+      ictx.drawImage(img, p.x - s / 2, p.y - s * 0.8, s, s);
+    }});
+  }
+  // パーティクル
+  for (const pt of particles) {
+    const p = project(pt.x, pt.y, pt.z);
+    if (!p) continue;
+    list.push({ dz: p.dz, draw: () => {
+      const s = Math.max(1, pt.size * p.scale * 2);
+      ictx.fillStyle = pt.col;
+      ictx.globalAlpha = clamp(pt.life / 15, 0, 1);
+      ictx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+      ictx.globalAlpha = 1;
+    }});
+  }
+  list.sort((a, b) => b.dz - a.dz);
+  for (const s of list) s.draw();
+}
+
+// ============================================================
+//  HUD
+// ============================================================
+const RANK_LABEL = ['1st', '2nd', '3rd', '4th', '5th', '6th'];
+const RANK_COL = ['#ffd020', '#c8c8d8', '#c88848', '#68a8e8', '#68a8e8', '#68a8e8'];
+const ITEM_ICON = { mushroom: sprMush, banana: sprBanana, greenShell: sprShellG, redShell: sprShellR };
+
+function fmtTime(frames) {
+  const t = frames / 60;
+  const m = Math.floor(t / 60), s = Math.floor(t % 60), ms = Math.floor((t * 100) % 100);
+  return `${m}'${String(s).padStart(2, '0')}"${String(ms).padStart(2, '0')}`;
+}
+
+function drawHUD() {
+  const s = dispW / IW;
+  ctx.textBaseline = 'alphabetic';
+
+  // 順位
+  ctx.font = `italic 900 ${34 * s}px sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.lineWidth = 6 * s; ctx.strokeStyle = '#202030';
+  ctx.strokeText(RANK_LABEL[player.rank - 1], 14 * s, 40 * s);
+  ctx.fillStyle = RANK_COL[player.rank - 1];
+  ctx.fillText(RANK_LABEL[player.rank - 1], 14 * s, 40 * s);
+
+  // ラップ
+  ctx.font = `bold ${15 * s}px sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.lineWidth = 4 * s;
+  const lapText = `LAP ${Math.min(player.lap, LAPS)}/${LAPS}`;
+  ctx.strokeText(lapText, (IW - 12) * s, 24 * s);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(lapText, (IW - 12) * s, 24 * s);
+  // タイム
+  ctx.font = `bold ${11 * s}px sans-serif`;
+  ctx.strokeText(fmtTime(raceTime), (IW - 12) * s, 40 * s);
+  ctx.fillStyle = '#e8e8f0';
+  ctx.fillText(fmtTime(raceTime), (IW - 12) * s, 40 * s);
+
+  // コイン
+  ctx.drawImage(sprCoin, 14 * s, 48 * s, 14 * s, 14 * s);
+  ctx.font = `bold ${13 * s}px sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.strokeText(`×${player.coins}`, 30 * s, 60 * s);
+  ctx.fillStyle = '#ffd838';
+  ctx.fillText(`×${player.coins}`, 30 * s, 60 * s);
+
+  // アイテムスロット
+  const slotX = (IW / 2 - 19) * s, slotY = 7 * s, slotS = 38 * s;
+  let icon = null;
+  if (player.rouletteT > 0) {
+    icon = ITEM_ICON[ITEM_TYPES[Math.floor(frameCount / 4) % ITEM_TYPES.length]];
+  } else if (player.item) {
+    icon = ITEM_ICON[player.item];
+  }
+  ctx.fillStyle = icon ? 'rgba(20,20,40,0.6)' : 'rgba(20,20,40,0.22)';
+  ctx.beginPath();
+  ctx.arc(slotX + slotS / 2, slotY + slotS / 2, slotS / 2, 0, TAU);
+  ctx.fill();
+  ctx.lineWidth = 2.5 * s;
+  ctx.strokeStyle = icon ? '#e8c838' : 'rgba(232,200,56,0.45)';
+  ctx.stroke();
+  if (icon) ctx.drawImage(icon, slotX + 6 * s, slotY + 6 * s, slotS - 12 * s, slotS - 12 * s);
+
+  // スピードメーター
+  ctx.font = `italic bold ${16 * s}px sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.lineWidth = 4 * s;
+  const kmh = Math.abs(player.speed * 32).toFixed(0);
+  ctx.strokeText(`${kmh} km/h`, (IW - 12) * s, (IH - 12) * s);
+  ctx.fillStyle = player.boost > 0 ? '#ffa030' : '#fff';
+  ctx.fillText(`${kmh} km/h`, (IW - 12) * s, (IH - 12) * s);
+
+  // ミニマップ
+  const mmS = 82 * s, mmX = 12 * s, mmY = (IH - 96) * s;
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+  ctx.lineWidth = 3.5 * s;
+  ctx.beginPath();
+  for (let i = 0; i <= PN; i += 6) {
+    const p = PATH[i % PN];
+    const x = mmX + p.x / TRACK_SIZE * mmS, y = mmY + p.y / TRACK_SIZE * mmS;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  for (const k of [...karts].reverse()) {
+    const x = mmX + k.x / TRACK_SIZE * mmS, y = mmY + k.y / TRACK_SIZE * mmS;
+    ctx.fillStyle = k.isPlayer ? '#fff' : CHARS[k.charIdx].body;
+    ctx.beginPath();
+    ctx.arc(x, y, (k.isPlayer ? 4 : 3) * s, 0, TAU);
+    ctx.fill();
+    if (k.isPlayer) { ctx.strokeStyle = '#202030'; ctx.lineWidth = 1.5 * s; ctx.stroke(); }
+  }
+  ctx.restore();
+
+  // ドリフトチャージ表示
+  if (player.drift !== 0) {
+    const col = player.driftCharge > 190 ? '#ff9020' : player.driftCharge > 90 ? '#40c0ff' : '#aaa';
+    ctx.fillStyle = col;
+    const w = clamp(player.driftCharge / 220, 0, 1) * 60 * s;
+    ctx.fillRect((IW / 2 - 30) * s, (IH - 30) * s, w, 5 * s);
+    ctx.strokeStyle = '#202030'; ctx.lineWidth = 1.5 * s;
+    ctx.strokeRect((IW / 2 - 30) * s, (IH - 30) * s, 60 * s, 5 * s);
+  }
+
+  // カウントダウン
+  if (countdown > 0) {
+    const sec = Math.ceil(countdown / 60);
+    if (sec <= 3) {
+      ctx.font = `italic 900 ${70 * s}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 10 * s;
+      ctx.strokeStyle = '#202030';
+      const txt = String(sec);
+      ctx.strokeText(txt, dispW / 2, dispH * 0.42);
+      ctx.fillStyle = ['#40c040', '#e8c020', '#e04040'][sec - 1] || '#fff';
+      ctx.fillText(txt, dispW / 2, dispH * 0.42);
+    }
+  } else if (countdown <= 0 && raceTime < 60) {
+    ctx.font = `italic 900 ${58 * s}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 10 * s;
+    ctx.strokeStyle = '#202030';
+    ctx.strokeText('GO!', dispW / 2, dispH * 0.42);
+    ctx.fillStyle = '#40d060';
+    ctx.fillText('GO!', dispW / 2, dispH * 0.42);
+  }
+
+  // ゴール表示
+  if (player.finished && state === 'race') {
+    ctx.font = `italic 900 ${44 * s}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 8 * s;
+    ctx.strokeStyle = '#202030';
+    ctx.strokeText('FINISH!', dispW / 2, dispH * 0.42);
+    ctx.fillStyle = '#ffd020';
+    ctx.fillText('FINISH!', dispW / 2, dispH * 0.42);
+  }
+
+  // タッチボタン
+  if (isTouch) drawTouchButtons(s);
+}
+
+function drawTouchButtons(s) {
+  touchBtns.length = 0;
+  const defs = [
+    { id: 'left',  x: 12,  y: IH - 62, w: 46, h: 46, label: '◀' },
+    { id: 'right', x: 66,  y: IH - 62, w: 46, h: 46, label: '▶' },
+    { id: 'drift', x: IW - 112, y: IH - 62, w: 46, h: 46, label: 'DR' },
+    { id: 'item',  x: IW - 58,  y: IH - 62, w: 46, h: 46, label: '🍄' },
+  ];
+  ctx.textBaseline = 'middle';
+  for (const d of defs) {
+    const x = d.x * s, y = d.y * s, w = d.w * s, h = d.h * s;
+    touchBtns.push({ id: d.id, x, y, w, h });
+    ctx.fillStyle = touchState[d.id] ? 'rgba(255,255,255,0.45)' : 'rgba(255,255,255,0.18)';
+    ctx.beginPath();
+    ctx.arc(x + w / 2, y + h / 2, w / 2, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${16 * s}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(d.label, x + w / 2, y + h / 2);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ============================================================
+//  タイトル / キャラ選択 / リザルト画面
+// ============================================================
+function drawTitle() {
+  const s = dispW / IW;
+  // 背景: レース画面を流す
+  camDir += 0.004;
+  camX = 1024 + Math.cos(frameCount * 0.002) * 500;
+  camY = 1024 + Math.sin(frameCount * 0.002) * 500;
+  renderFloor();
+  ctx.drawImage(inner, 0, 0, dispW, dispH);
+  ctx.fillStyle = 'rgba(10,10,30,0.45)';
+  ctx.fillRect(0, 0, dispW, dispH);
+
+  ctx.textAlign = 'center';
+  ctx.font = `italic 900 ${40 * s}px sans-serif`;
+  ctx.lineWidth = 10 * s; ctx.strokeStyle = '#202040';
+  ctx.strokeText('スーパーカート', dispW / 2, dispH * 0.32);
+  const grad = ctx.createLinearGradient(0, dispH * 0.2, 0, dispH * 0.36);
+  grad.addColorStop(0, '#ffd020'); grad.addColorStop(1, '#ff7020');
+  ctx.fillStyle = grad;
+  ctx.fillText('スーパーカート', dispW / 2, dispH * 0.32);
+  ctx.font = `italic 900 ${28 * s}px sans-serif`;
+  ctx.lineWidth = 8 * s;
+  ctx.strokeText('グランプリ', dispW / 2, dispH * 0.45);
+  ctx.fillStyle = '#40c8ff';
+  ctx.fillText('グランプリ', dispW / 2, dispH * 0.45);
+
+  if (Math.floor(frameCount / 30) % 2 === 0) {
+    ctx.font = `bold ${14 * s}px sans-serif`;
+    ctx.lineWidth = 4 * s; ctx.strokeStyle = '#202040';
+    ctx.strokeText('ENTERキー / タップ でスタート', dispW / 2, dispH * 0.66);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('ENTERキー / タップ でスタート', dispW / 2, dispH * 0.66);
+  }
+  ctx.font = `${9.5 * s}px sans-serif`;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText('↑↓←→/WASD: 走行   スペース: ドリフト   Shift/E: アイテム   M: ミュート', dispW / 2, dispH * 0.88);
+}
+
+function drawSelect() {
+  const s = dispW / IW;
+  camDir += 0.004;
+  renderFloor();
+  ctx.drawImage(inner, 0, 0, dispW, dispH);
+  ctx.fillStyle = 'rgba(10,10,30,0.55)';
+  ctx.fillRect(0, 0, dispW, dispH);
+
+  ctx.textAlign = 'center';
+  ctx.font = `italic 900 ${22 * s}px sans-serif`;
+  ctx.lineWidth = 6 * s; ctx.strokeStyle = '#202040';
+  ctx.strokeText('キャラクターをえらぼう', dispW / 2, 40 * s);
+  ctx.fillStyle = '#ffd020';
+  ctx.fillText('キャラクターをえらぼう', dispW / 2, 40 * s);
+
+  for (let i = 0; i < CHARS.length; i++) {
+    const ch = CHARS[i];
+    const bx = (60 + (i % 3) * 130) * s, by = (92 + Math.floor(i / 3) * 74) * s;
+    const sel = i === selCursor;
+    ctx.fillStyle = sel ? 'rgba(255,216,56,0.30)' : 'rgba(255,255,255,0.10)';
+    ctx.strokeStyle = sel ? '#ffd838' : 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = (sel ? 3 : 1.5) * s;
+    const rx = bx - 45 * s, ry = by - 30 * s, rw = 130 * s, rh = 62 * s;
+    ctx.beginPath();
+    ctx.roundRect(rx, ry, rw, rh, 8 * s);
+    ctx.fill(); ctx.stroke();
+    // カートアイコン
+    ctx.drawImage(kartSprites[i][0], bx - 66 * s + 26 * s, by - 24 * s, 48 * s, 36 * s);
+    ctx.textAlign = 'left';
+    ctx.font = `bold ${14 * s}px sans-serif`;
+    ctx.fillStyle = '#fff';
+    ctx.fillText(ch.name, bx + 14 * s, by - 4 * s);
+    // ステータス
+    ctx.font = `${8 * s}px sans-serif`;
+    ctx.fillStyle = '#c0c8e0';
+    const spd = Math.round((ch.speed - 3.4) / 0.5 * 5);
+    const hnd = Math.round((ch.handling - 0.025) / 0.02 * 5);
+    ctx.fillText(`はやさ ${'★'.repeat(clamp(spd, 1, 5))}`, bx + 14 * s, by + 10 * s);
+    ctx.fillText(`まがり ${'★'.repeat(clamp(hnd, 1, 5))}`, bx + 14 * s, by + 21 * s);
+  }
+
+  ctx.textAlign = 'center';
+  if (Math.floor(frameCount / 30) % 2 === 0) {
+    ctx.font = `bold ${13 * s}px sans-serif`;
+    ctx.lineWidth = 4 * s; ctx.strokeStyle = '#202040';
+    ctx.strokeText('ENTER / タップ でけってい', dispW / 2, (IH - 18) * s);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('ENTER / タップ でけってい', dispW / 2, (IH - 18) * s);
+  }
+}
+
+function drawFinished() {
+  const s = dispW / IW;
+  renderFloor();
+  renderSprites();
+  ctx.drawImage(inner, 0, 0, dispW, dispH);
+  ctx.fillStyle = 'rgba(10,10,30,0.6)';
+  ctx.fillRect(0, 0, dispW, dispH);
+
+  ctx.textAlign = 'center';
+  ctx.font = `italic 900 ${28 * s}px sans-serif`;
+  ctx.lineWidth = 8 * s; ctx.strokeStyle = '#202040';
+  ctx.strokeText('レースけっか', dispW / 2, 42 * s);
+  ctx.fillStyle = '#ffd020';
+  ctx.fillText('レースけっか', dispW / 2, 42 * s);
+
+  const sorted = [...karts].sort((a, b) => a.rank - b.rank);
+  for (let i = 0; i < sorted.length; i++) {
+    const k = sorted[i];
+    const y = (68 + i * 26) * s;
+    const isP = k.isPlayer;
+    ctx.fillStyle = isP ? 'rgba(255,216,56,0.25)' : 'rgba(255,255,255,0.08)';
+    ctx.beginPath();
+    ctx.roundRect(dispW / 2 - 130 * s, y - 16 * s, 260 * s, 22 * s, 5 * s);
+    ctx.fill();
+    ctx.textAlign = 'left';
+    ctx.font = `italic 900 ${15 * s}px sans-serif`;
+    ctx.fillStyle = RANK_COL[i];
+    ctx.fillText(RANK_LABEL[i], dispW / 2 - 120 * s, y);
+    ctx.drawImage(kartSprites[k.charIdx][0], dispW / 2 - 84 * s, y - 14 * s, 24 * s, 18 * s);
+    ctx.font = `bold ${13 * s}px sans-serif`;
+    ctx.fillStyle = isP ? '#ffd838' : '#fff';
+    ctx.fillText(CHARS[k.charIdx].name + (isP ? ' (あなた)' : ''), dispW / 2 - 52 * s, y);
+    ctx.textAlign = 'right';
+    ctx.font = `${11 * s}px sans-serif`;
+    ctx.fillStyle = '#c0c8e0';
+    ctx.fillText(k.finished ? fmtTime(k.finishTime) : 'リタイア', dispW / 2 + 120 * s, y);
+  }
+
+  ctx.textAlign = 'center';
+  if (Math.floor(frameCount / 30) % 2 === 0) {
+    ctx.font = `bold ${13 * s}px sans-serif`;
+    ctx.lineWidth = 4 * s; ctx.strokeStyle = '#202040';
+    ctx.strokeText('ENTER / タップ でもういちど', dispW / 2, (IH - 14) * s);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('ENTER / タップ でもういちど', dispW / 2, (IH - 14) * s);
+  }
+}
+
+// ============================================================
+//  メインループ
+// ============================================================
+let lastT = 0, acc = 0;
+function loop(t) {
+  requestAnimationFrame(loop);
+  if (!lastT) lastT = t;
+  let dt = t - lastT;
+  lastT = t;
+  if (dt > 100) dt = 100;
+  acc += dt;
+  const STEP = 1000 / 60;
+  let steps = 0;
+  while (acc >= STEP && steps < 4) {
+    frameCount++;
+    if (state === 'race') updateRace();
+    acc -= STEP;
+    steps++;
+  }
+  if (steps === 4) acc = 0;
+
+  if (state === 'title') { drawTitle(); }
+  else if (state === 'select') { drawSelect(); }
+  else if (state === 'finished') { updateEngine(0, false); drawFinished(); }
+  else {
+    renderFloor();
+    renderSprites();
+    ctx.drawImage(inner, 0, 0, dispW, dispH);
+    drawHUD();
+  }
+
+  // ミュート表示
+  if (muted) {
+    const s = dispW / IW;
+    ctx.font = `bold ${10 * s}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillText('🔇 MUTE (M)', 14 * s, (IH - 4) * s);
+  }
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
